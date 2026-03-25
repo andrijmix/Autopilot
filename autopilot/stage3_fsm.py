@@ -333,9 +333,15 @@ class Stage3FSM:
         r_land = self._cfg.stage3.nav.r_land_trigger_m
         max_fine = self._cfg.stage3.nav.pitch_delta_fine
         if aligned and dist > r_land:
-            ratio = min(1.0, max(0.0, (dist - r_land) / 60.0))
-            # Keep enough forward authority to avoid stalling far from B.
-            pitch_delta = int(max(20, round(max_fine * ratio)))
+            # Two-phase slowdown:
+            # 1. From 80m→30m: maintain full pitch (cruise speed)
+            # 2. From 30m→8m: linearly reduce pitch from max to minimum (gradual decel)
+            if dist > 30.0:
+                pitch_delta = max_fine  # Full forward authority to maintain speed cruising in
+            else:
+                # Linear ramp: 30m → 8m corresponds to max_fine → 20 PWM
+                ratio = (dist - r_land) / (30.0 - r_land)  # 0.0 to 1.0
+                pitch_delta = int(20.0 + ratio * (max_fine - 20.0))
         else:
             pitch_delta = 0
 

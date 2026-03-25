@@ -111,7 +111,7 @@ class Stage3NavConfig:
 
     # Pitch forward force
     pitch_delta_cruise: int = 120             # PWM delta during ENROUTE_TO_B (higher speed on long route)
-    pitch_delta_fine: int = 35                # Max PWM delta during APPROACH_FINE (gradual slowdown)
+    pitch_delta_fine: int = 80                # Max PWM delta during APPROACH_FINE (maintain momentum, reduce near landing)
 
     # Heading alignment guard
     align_threshold_deg: float = 20.0        # suppress forward pitch until within this many degrees of bearing
