@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 from typing import Optional
 
@@ -16,6 +17,11 @@ def telemetry_snapshot(vehicle: Vehicle) -> dict:
     gps = vehicle.gps_0
     mode_name: Optional[str] = getattr(vehicle.mode, "name", None)
 
+    velocity = getattr(vehicle, "velocity", None)
+    h_speed: Optional[float] = None
+    if velocity is not None and len(velocity) >= 2:
+        h_speed = math.sqrt(velocity[0] ** 2 + velocity[1] ** 2)
+
     return {
         "lat": location.lat,
         "lon": location.lon,
@@ -25,6 +31,8 @@ def telemetry_snapshot(vehicle: Vehicle) -> dict:
         "gps_fix_type": getattr(gps, "fix_type", None),
         "gps_eph": getattr(gps, "eph", None),
         "gps_satellites": getattr(gps, "satellites_visible", None),
+        "velocity": velocity,
+        "h_speed_ms": h_speed,
     }
 
 

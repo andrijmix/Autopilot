@@ -6,17 +6,19 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from autopilot.config import build_default_config
+    from autopilot.config import Stage3TimeoutsConfig, build_default_config
     from autopilot.connection import connect_vehicle
     from autopilot.mission_fsm import MissionFSM, MissionState
     from autopilot.preflight import run_preflight_checks
     from autopilot.rc_override import DryRunRcOverrideAdapter, RcOverrideAdapter
+    from autopilot.stage3_fsm import Stage3FSM, Stage3State
 else:
-    from .config import build_default_config
+    from .config import Stage3TimeoutsConfig, build_default_config
     from .connection import connect_vehicle
     from .mission_fsm import MissionFSM, MissionState
     from .preflight import run_preflight_checks
     from .rc_override import DryRunRcOverrideAdapter, RcOverrideAdapter
+    from .stage3_fsm import Stage3FSM, Stage3State
 
 
 def configure_logging() -> logging.Logger:
@@ -29,10 +31,29 @@ def configure_logging() -> logging.Logger:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Autopilot Stage 2: preflight + FSM mission scaffold in Stabilize"
+        description="Autopilot: preflight + FSM mission in Stabilize (Stage 2 stub / Stage 3 SITL)"
     )
     parser.add_argument("--connect", required=True, help="Vehicle connection string")
     parser.add_argument("--baud", type=int, default=57600, help="Connection baud rate")
+    parser.add_argument(
+        "--sim-only",
+        action="store_true",
+        help="[REQUIRED for Stage 3] Confirm this is a SITL simulation run. "
+             "Enables Stage 3 FSM: real takeoff, altitude hold, A→B flight, landing.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compute and log RC commands but do NOT send them to the vehicle.",
+    )
+    # Stage 2 stub overrides (backward-compatible)
+    parser.add_argument(
+        "--navigate-stub-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Override Stage 2 FSM NAVIGATE_STUB timeout (useful for tests)",
+    )
     parser.add_argument(
         "--telemetry-duration",
         type=float,
@@ -45,31 +66,42 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override telemetry log interval in seconds",
     )
+    # Stage 3 per-state timeout overrides (useful for tests)
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Do not send RC override to vehicle; compute and log commands only",
-    )
-    parser.add_argument(
-        "--navigate-stub-timeout",
+        "--stage3-takeoff-timeout",
         type=float,
         default=None,
         metavar="SECONDS",
-        help="Override FSM NAVIGATE_STUB timeout (useful for tests)",
+        help="Override Stage 3 TAKEOFF state timeout",
+    )
+    parser.add_argument(
+        "--stage3-enroute-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Override Stage 3 ENROUTE_TO_B state timeout",
+    )
+    parser.add_argument(
+        "--stage3-approach-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Override Stage 3 APPROACH_FINE state timeout",
+    )
+    parser.add_argument(
+        "--stage3-landing-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Override Stage 3 LANDING state timeout",
     )
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
-    logger = configure_logging()
-    cfg = build_default_config()
-
+def _apply_overrides(cfg, args):
+    """Return a new AppConfig with CLI overrides applied."""
     if args.telemetry_duration is not None:
-        cfg = replace(
-            cfg,
-            telemetry=replace(cfg.telemetry, session_duration_s=args.telemetry_duration),
-        )
+        cfg = replace(cfg, telemetry=replace(cfg.telemetry, session_duration_s=args.telemetry_duration))
 
     if args.telemetry_interval is not None:
         cfg = replace(cfg, telemetry=replace(cfg.telemetry, interval_s=args.telemetry_interval))
@@ -77,22 +109,62 @@ def main() -> int:
     if args.navigate_stub_timeout is not None:
         cfg = replace(
             cfg,
-            mission_timeouts=replace(
-                cfg.mission_timeouts,
-                navigate_stub_s=args.navigate_stub_timeout,
+            mission_timeouts=replace(cfg.mission_timeouts, navigate_stub_s=args.navigate_stub_timeout),
+        )
+
+    # Stage 3 timeout overrides
+    s3_timeout_changes = {}
+    if args.stage3_takeoff_timeout is not None:
+        s3_timeout_changes["takeoff_s"] = args.stage3_takeoff_timeout
+    if args.stage3_enroute_timeout is not None:
+        s3_timeout_changes["enroute_s"] = args.stage3_enroute_timeout
+    if args.stage3_approach_timeout is not None:
+        s3_timeout_changes["approach_s"] = args.stage3_approach_timeout
+    if args.stage3_landing_timeout is not None:
+        s3_timeout_changes["landing_s"] = args.stage3_landing_timeout
+
+    if s3_timeout_changes:
+        cfg = replace(
+            cfg,
+            stage3=replace(
+                cfg.stage3,
+                timeouts=replace(cfg.stage3.timeouts, **s3_timeout_changes),
             ),
+        )
+
+    return cfg
+
+
+def main() -> int:
+    args = parse_args()
+    logger = configure_logging()
+    cfg = build_default_config()
+    cfg = _apply_overrides(cfg, args)
+
+    logger.info(
+        "Mission config: A=(%.6f, %.6f), B=(%.6f, %.6f), target_alt_m=%.1f",
+        cfg.mission.point_a.lat,
+        cfg.mission.point_a.lon,
+        cfg.mission.point_b.lat,
+        cfg.mission.point_b.lon,
+        cfg.mission.target_altitude_m,
+    )
+
+    # ---------------------------------------------------------------
+    # Stage 3 SITL guard
+    # ---------------------------------------------------------------
+    if not args.sim_only:
+        logger.info("Running Stage 2 stub FSM (no --sim-only flag). "
+                    "Pass --sim-only to enable Stage 3 controlled flight.")
+    else:
+        logger.info(
+            "Stage 3 SIMULATION-ONLY mode enabled. "
+            "Controlled takeoff/flight/landing in SITL. dry_run=%s",
+            args.dry_run,
         )
 
     vehicle = None
     try:
-        logger.info(
-            "Mission config: A=(%.6f, %.6f), B=(%.6f, %.6f), target_alt_m=%.1f",
-            cfg.mission.point_a.lat,
-            cfg.mission.point_a.lon,
-            cfg.mission.point_b.lat,
-            cfg.mission.point_b.lon,
-            cfg.mission.target_altitude_m,
-        )
         logger.info("Connecting to vehicle: %s", args.connect)
         vehicle = connect_vehicle(args.connect, baud=args.baud)
         logger.info("Connection established")
@@ -107,12 +179,33 @@ def main() -> int:
             return 2
 
         if args.dry_run:
-            logger.info("Stage 2 running in DRY-RUN mode: RC override commands will be logged only")
+            logger.info("DRY-RUN mode: RC override commands will be logged only")
             rc_adapter = DryRunRcOverrideAdapter(cfg.rc_override)
         else:
-            logger.info("Stage 2 running in NORMAL mode: RC override commands will be sent to vehicle")
+            logger.info("NORMAL mode: RC override commands will be sent to vehicle")
             rc_adapter = RcOverrideAdapter(vehicle, cfg.rc_override)
 
+        # ---------------------------------------------------------------
+        # Stage 3 FSM (SITL controlled flight)
+        # ---------------------------------------------------------------
+        if args.sim_only:
+            fsm3 = Stage3FSM(
+                vehicle=vehicle,
+                cfg=cfg,
+                rc_adapter=rc_adapter,
+                logger=logger,
+                dry_run=args.dry_run,
+            )
+            result3 = fsm3.run()
+            if result3 == Stage3State.COMPLETE:
+                logger.info("Stage3 mission finished: COMPLETE")
+                return 0
+            logger.error("Stage3 mission finished: ABORT")
+            return 3
+
+        # ---------------------------------------------------------------
+        # Stage 2 stub FSM (no --sim-only)
+        # ---------------------------------------------------------------
         fsm = MissionFSM(vehicle=vehicle, cfg=cfg, rc_adapter=rc_adapter, logger=logger)
         result = fsm.run()
 
@@ -122,6 +215,7 @@ def main() -> int:
 
         logger.error("Mission finished with ABORT state")
         return 3
+
     except Exception as exc:
         logger.exception("Fatal error: %s", exc)
         return 1
@@ -133,3 +227,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
