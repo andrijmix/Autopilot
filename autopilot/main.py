@@ -8,13 +8,15 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from autopilot.config import build_default_config
     from autopilot.connection import connect_vehicle
+    from autopilot.mission_fsm import MissionFSM, MissionState
     from autopilot.preflight import run_preflight_checks
-    from autopilot.telemetry import log_telemetry_session
+    from autopilot.rc_override import DryRunRcOverrideAdapter, RcOverrideAdapter
 else:
     from .config import build_default_config
     from .connection import connect_vehicle
+    from .mission_fsm import MissionFSM, MissionState
     from .preflight import run_preflight_checks
-    from .telemetry import log_telemetry_session
+    from .rc_override import DryRunRcOverrideAdapter, RcOverrideAdapter
 
 
 def configure_logging() -> logging.Logger:
@@ -27,7 +29,7 @@ def configure_logging() -> logging.Logger:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Autopilot Stage 1: connect, preflight checks, telemetry logging"
+        description="Autopilot Stage 2: preflight + FSM mission scaffold in Stabilize"
     )
     parser.add_argument("--connect", required=True, help="Vehicle connection string")
     parser.add_argument("--baud", type=int, default=57600, help="Connection baud rate")
@@ -42,6 +44,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Override telemetry log interval in seconds",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Do not send RC override to vehicle; compute and log commands only",
+    )
+    parser.add_argument(
+        "--navigate-stub-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Override FSM NAVIGATE_STUB timeout (useful for tests)",
     )
     return parser.parse_args()
 
@@ -59,6 +73,15 @@ def main() -> int:
 
     if args.telemetry_interval is not None:
         cfg = replace(cfg, telemetry=replace(cfg.telemetry, interval_s=args.telemetry_interval))
+
+    if args.navigate_stub_timeout is not None:
+        cfg = replace(
+            cfg,
+            mission_timeouts=replace(
+                cfg.mission_timeouts,
+                navigate_stub_s=args.navigate_stub_timeout,
+            ),
+        )
 
     vehicle = None
     try:
@@ -80,17 +103,25 @@ def main() -> int:
             logger.log(level, "preflight check=%s ok=%s details=%s", check.name, check.ok, check.details)
 
         if not report.ok:
-            logger.error("Pre-flight checks failed. Telemetry session aborted.")
+            logger.error("Pre-flight checks failed. Mission aborted before FSM start.")
             return 2
 
-        logger.info(
-            "Starting telemetry session: duration=%.1fs interval=%.1fs",
-            cfg.telemetry.session_duration_s,
-            cfg.telemetry.interval_s,
-        )
-        log_telemetry_session(vehicle, cfg.telemetry, logger)
-        logger.info("Telemetry session finished")
-        return 0
+        if args.dry_run:
+            logger.info("Stage 2 running in DRY-RUN mode: RC override commands will be logged only")
+            rc_adapter = DryRunRcOverrideAdapter(cfg.rc_override)
+        else:
+            logger.info("Stage 2 running in NORMAL mode: RC override commands will be sent to vehicle")
+            rc_adapter = RcOverrideAdapter(vehicle, cfg.rc_override)
+
+        fsm = MissionFSM(vehicle=vehicle, cfg=cfg, rc_adapter=rc_adapter, logger=logger)
+        result = fsm.run()
+
+        if result == MissionState.COMPLETE:
+            logger.info("Mission finished with COMPLETE state")
+            return 0
+
+        logger.error("Mission finished with ABORT state")
+        return 3
     except Exception as exc:
         logger.exception("Fatal error: %s", exc)
         return 1
