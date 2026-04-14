@@ -2,6 +2,7 @@ import argparse
 import logging
 import sys
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -22,11 +23,27 @@ else:
 
 
 def configure_logging() -> logging.Logger:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
-    return logging.getLogger("autopilot")
+    log_dir = Path.cwd() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"autopilot-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
+
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.handlers.clear()
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+
+    root_logger.addHandler(stream_handler)
+    root_logger.addHandler(file_handler)
+
+    logger = logging.getLogger("autopilot")
+    logger.info("Logging to file: %s", log_path)
+    return logger
 
 
 def parse_args() -> argparse.Namespace:
