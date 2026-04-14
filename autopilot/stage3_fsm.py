@@ -178,17 +178,24 @@ class Stage3FSM:
         if target_alt <= 0:
             self._abort("invalid target_altitude in config")
             return
+        h_speed = self._horizontal_speed()
         self._logger.info(
-            "Stage3 INIT: target_alt=%.1fm  B=(%.6f, %.6f)",
+            "Stage3 INIT: target_alt=%.1fm  B=(%.6f, %.6f)  h_speed=%.2fm/s",
             target_alt,
             self._cfg.mission.point_b.lat,
             self._cfg.mission.point_b.lon,
+            h_speed,
         )
         self._transition(Stage3State.READY, "config validated")
 
     def _tick_ready(self, elapsed_s: float) -> None:
+        h_speed = self._horizontal_speed()
         if self._dry_run:
-            self._logger.info("Stage3 READY [dry-run]: skip mode set, elapsed=%.1fs", elapsed_s)
+            self._logger.info(
+                "Stage3 READY [dry-run]: skip mode set, elapsed=%.1fs  h_speed=%.2fm/s",
+                elapsed_s,
+                h_speed,
+            )
             self._transition(Stage3State.TAKEOFF, "dry-run: skip STABILIZE wait")
             return
 
@@ -206,7 +213,11 @@ class Stage3FSM:
             self._set_mode("STABILIZE")
             return  # re-check on next tick
 
-        self._logger.info("Stage3 READY: STABILIZE mode confirmed, elapsed=%.1fs", elapsed_s)
+        self._logger.info(
+            "Stage3 READY: STABILIZE mode confirmed, elapsed=%.1fs  h_speed=%.2fm/s",
+            elapsed_s,
+            h_speed,
+        )
         self._transition(Stage3State.TAKEOFF, "STABILIZE confirmed")
 
     def _tick_takeoff(self, elapsed_s: float) -> None:
@@ -218,6 +229,9 @@ class Stage3FSM:
         armed = snap.get("armed", False)
         target_alt = self._cfg.mission.target_altitude_m
         neutral = self._rc.neutral_command()
+        b = self._cfg.mission.point_b
+        bearing = bearing_deg(snap["lat"], snap["lon"], b.lat, b.lon)
+        h_speed = self._horizontal_speed(bearing)
 
         if not armed:
             if not self._dry_run:
@@ -229,21 +243,21 @@ class Stage3FSM:
                     self._vehicle.channels.overrides = {}
                     self._arm_override_cleared = True
                     self._logger.info(
-                        "state=TAKEOFF elapsed=%.1fs  waiting_arm=True  alt=%.2fm  "
+                        "state=TAKEOFF elapsed=%.1fs  waiting_arm=True  alt=%.2fm  h_speed=%.2fm/s  "
                         "overrides_cleared (SITL throttle now at default)",
-                        elapsed_s, alt,
+                        elapsed_s, alt, h_speed,
                     )
                 else:
                     # Subsequent ticks: SITL default throttle≈1000 is active → arm
                     self._logger.info(
-                        "state=TAKEOFF elapsed=%.1fs  waiting_arm=True  alt=%.2fm",
-                        elapsed_s, alt,
+                        "state=TAKEOFF elapsed=%.1fs  waiting_arm=True  alt=%.2fm  h_speed=%.2fm/s",
+                        elapsed_s, alt, h_speed,
                     )
                     self._try_arm()
             else:
                 self._logger.info(
-                    "state=TAKEOFF elapsed=%.1fs  waiting_arm=True  alt=%.2fm  [dry-run: skip arm]",
-                    elapsed_s, alt,
+                    "state=TAKEOFF elapsed=%.1fs  waiting_arm=True  alt=%.2fm  h_speed=%.2fm/s  [dry-run: skip arm]",
+                    elapsed_s, alt, h_speed,
                 )
             return
 
@@ -265,11 +279,12 @@ class Stage3FSM:
         )
         pct = (alt / target_alt * 100.0) if target_alt else 0.0
         self._logger.info(
-            "state=TAKEOFF elapsed=%.1fs  alt=%.2fm/%.1fm (%.0f%%)  rc(thr=%d)",
+            "state=TAKEOFF elapsed=%.1fs  alt=%.2fm/%.1fm (%.0f%%)  h_speed=%.2fm/s  rc(thr=%d)",
             elapsed_s,
             alt,
             target_alt,
             pct,
+            h_speed,
             cmd.throttle,
         )
 
@@ -311,10 +326,11 @@ class Stage3FSM:
             yaw=neutral.yaw + yaw_delta,
         )
 
+        h_speed = self._horizontal_speed(brng)
         self._logger.info(
             "state=ENROUTE_TO_B  dist=%.1fm  brng=%.1f  hdg=%.1f  "
-            "alt=%.1fm  alt_err=%.1f  aligned=%s  rc(roll=%d pitch=%d thr=%d yaw=%d)",
-            dist, brng, heading, alt, alt_err, aligned,
+            "alt=%.1fm  alt_err=%.1f  h_speed=%.2fm/s  aligned=%s  rc(roll=%d pitch=%d thr=%d yaw=%d)",
+            dist, brng, heading, alt, alt_err, h_speed, aligned,
             cmd.roll, cmd.pitch, cmd.throttle, cmd.yaw,
         )
 
@@ -363,7 +379,7 @@ class Stage3FSM:
             yaw=neutral.yaw + yaw_delta,
         )
 
-        h_speed = self._horizontal_speed()
+        h_speed = self._horizontal_speed(brng)
 
         self._logger.info(
             "state=APPROACH_FINE  dist=%.1fm  alt=%.1fm  alt_err=%.1f  "
@@ -394,6 +410,9 @@ class Stage3FSM:
         neutral = self._rc.neutral_command()
         hover = self._cfg.stage3.alt_ctrl.hover_pwm
         min_pwm = self._cfg.rc_override.bounds.min_pwm
+        b = self._cfg.mission.point_b
+        bearing = bearing_deg(snap["lat"], snap["lon"], b.lat, b.lon)
+        h_speed = self._horizontal_speed(bearing)
 
         # Assertive descent to avoid ballooning after switching from approach to landing.
         if alt > 5.0:
@@ -413,8 +432,8 @@ class Stage3FSM:
         )
 
         self._logger.info(
-            "state=LANDING  elapsed=%.1fs  alt=%.2fm  thr=%d",
-            elapsed_s, alt, cmd.throttle,
+            "state=LANDING  elapsed=%.1fs  alt=%.2fm  h_speed=%.2fm/s  thr=%d",
+            elapsed_s, alt, h_speed, cmd.throttle,
         )
 
         land_alt = self._cfg.stage3.nav.land_complete_alt_m
@@ -459,10 +478,13 @@ class Stage3FSM:
 
         return lat, lon, alt, dist, brng, yaw_err, heading
 
-    def _horizontal_speed(self) -> float:
+    def _horizontal_speed(self, target_bearing_deg: Optional[float] = None) -> float:
         vel = getattr(self._vehicle, "velocity", None)
         if vel is not None and len(vel) >= 2:
-            return math.sqrt(vel[0] ** 2 + vel[1] ** 2)
+            if target_bearing_deg is None:
+                return math.sqrt(vel[0] ** 2 + vel[1] ** 2)
+            rad = math.radians(target_bearing_deg)
+            return vel[0] * math.cos(rad) + vel[1] * math.sin(rad)
         snap = telemetry_snapshot(self._vehicle)
         return snap.get("h_speed_ms") or 0.0
 
