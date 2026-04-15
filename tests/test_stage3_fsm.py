@@ -87,6 +87,46 @@ def test_enroute_aligned_uses_cruise_pitch() -> None:
     assert pitch_delta == 200
 
 
+def test_takeoff_pitch_correction_pushes_forward_when_wind_blows_away_from_b() -> None:
+    fsm = _build_fsm()
+
+    pitch_corr = fsm._takeoff_pitch_correction(track_h_speed=-0.6)
+
+    assert pitch_corr > 0
+
+
+def test_takeoff_pitch_correction_does_not_push_backward_when_already_moving_to_b() -> None:
+    fsm = _build_fsm()
+    fsm._takeoff_pitch_integral = 0.0
+
+    pitch_corr = fsm._takeoff_pitch_correction(track_h_speed=0.4)
+
+    assert pitch_corr == 0
+
+
+def test_takeoff_applies_pitch_correction_to_hold_against_backward_drift() -> None:
+    fsm = _build_fsm()
+    fsm._fresh_snapshot = lambda: {
+        "lat": 50.44,
+        "lon": 30.44,
+        "alt_m": 40.0,
+        "armed": True,
+    }
+    fsm._horizontal_speed = lambda target_bearing_deg=None: -0.5 if target_bearing_deg is not None else 0.5
+
+    recorded = {}
+
+    def capture_apply(roll: int, pitch: int, throttle: int, yaw: int) -> RcCommand:
+        recorded.update({"roll": roll, "pitch": pitch, "throttle": throttle, "yaw": yaw})
+        return RcCommand(roll=roll, pitch=pitch, throttle=throttle, yaw=yaw)
+
+    fsm._rc.apply = capture_apply
+
+    fsm._tick_takeoff(8.0)
+
+    assert recorded["pitch"] > fsm._rc.neutral_command().pitch
+
+
 def test_approach_does_not_land_outside_land_radius() -> None:
     fsm = _build_fsm()
     fsm._nav_snapshot = lambda: (50.44, 30.44, 300.0, 5.2, 180.0, 35.0, 180.0)

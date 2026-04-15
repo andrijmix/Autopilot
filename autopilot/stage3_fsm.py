@@ -238,6 +238,8 @@ class Stage3FSM:
         h_speed = self._horizontal_speed(bearing)
 
         if not armed:
+            self._takeoff_pitch_integral = 0.0
+            self._takeoff_pitch_last_t = time.monotonic()
             if not self._dry_run:
                 if not self._arm_override_cleared:
                     # First tick: clear all RC overrides so SITL falls back to its
@@ -275,26 +277,30 @@ class Stage3FSM:
             )
         else:
             thr = nav_cfg.takeoff_throttle_pwm
+        pitch_corr = self._takeoff_pitch_correction(h_speed)
         cmd = self._rc.apply(
             roll=neutral.roll,
-            pitch=neutral.pitch,
+            pitch=neutral.pitch + pitch_corr,
             throttle=thr,
             yaw=neutral.yaw,
         )
         pct = (alt / target_alt * 100.0) if target_alt else 0.0
         self._logger.info(
-            "state=TAKEOFF elapsed=%.1fs  alt=%.2fm/%.1fm (%.0f%%)  h_speed=%.2fm/s  rc(thr=%d)",
+            "state=TAKEOFF elapsed=%.1fs  alt=%.2fm/%.1fm (%.0f%%)  h_speed=%.2fm/s  pitch_corr=%d  rc(thr=%d pitch=%d)",
             elapsed_s,
             alt,
             target_alt,
             pct,
             h_speed,
+            pitch_corr,
             cmd.throttle,
+            cmd.pitch,
         )
 
         threshold = target_alt * nav_cfg.takeoff_complete_fraction
         if alt >= threshold:
             self._alt_ctrl.reset()
+            self._takeoff_pitch_integral = 0.0
             self._transition(
                 Stage3State.ENROUTE_TO_B,
                 f"takeoff done: alt={alt:.1f}m >= {threshold:.1f}m ({pct:.0f}%)",
@@ -477,6 +483,27 @@ class Stage3FSM:
     def _fine_approach_entry_radius(self) -> float:
         nav_cfg = self._cfg.stage3.nav
         return max(nav_cfg.r_cruise_to_fine_m, nav_cfg.r_approach_slowdown_m)
+
+    def _takeoff_pitch_correction(self, track_h_speed: float) -> int:
+        nav_cfg = self._cfg.stage3.nav
+        now = time.monotonic()
+        dt = max(0.0, min(1.0, now - self._takeoff_pitch_last_t))
+        self._takeoff_pitch_last_t = now
+
+        speed_error = -track_h_speed
+        self._takeoff_pitch_integral += speed_error * dt
+        if nav_cfg.takeoff_pitch_ki > 0.0:
+            integral_limit = nav_cfg.takeoff_pitch_correction_max / nav_cfg.takeoff_pitch_ki
+            self._takeoff_pitch_integral = max(
+                -integral_limit,
+                min(integral_limit, self._takeoff_pitch_integral),
+            )
+
+        pitch_corr = (
+            nav_cfg.takeoff_pitch_kp * speed_error
+            + nav_cfg.takeoff_pitch_ki * self._takeoff_pitch_integral
+        )
+        return max(0, min(nav_cfg.takeoff_pitch_correction_max, int(round(pitch_corr))))
 
     def _approach_target_track_speed(self, dist: float) -> float:
         nav_cfg = self._cfg.stage3.nav
