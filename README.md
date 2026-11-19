@@ -178,6 +178,29 @@ pitch_corr = Kp_pitch * (-track_h_speed) + Ki_pitch * ∫(-track_h_speed) dt
 | `takeoff_pitch_ki` | 40.0 PWM / m |
 | `takeoff_pitch_correction_max` | 300 PWM |
 
+## GPS-denied / odometry mode
+
+`--nav-source odometry` switches the navigation source from GPS to the autopilot's local position estimate
+(MAVLink `LOCAL_POSITION_NED`, the EKF output), so the mission FSM can fly without a GPS fix.
+That estimate can be fed by an external Visual Odometry source; this repository contains the navigation
+side (position provider, preflight checks, FSM), not the odometry algorithm itself.
+
+How it works:
+
+- `OdometryPositionProvider` (`autopilot/navigation.py`) reads north / east / down from
+  `vehicle.location.local_frame`, plus heading and velocity, and returns the same `NavigationSnapshot` as the
+  GPS provider. The FSM and controllers are unchanged: they work in local NE coordinates either way.
+- Target B is given as GPS coordinates (`--target-lat` / `--target-lon`, converted to a local NE offset using
+  point A as the origin) or directly as a local offset (`--target-x` / `--target-y`, in metres).
+  Without one of these the run exits with an error.
+- Odometry-specific preflight checks (`run_odometry_preflight_checks`): heartbeat, armable, readable mode and
+  `LOCAL_POSITION_NED` available. No GPS fix is required.
+
+```bash
+python -m autopilot.main --connect tcp:127.0.0.1:5762 --sim-only \
+  --nav-source odometry --target-lat 50.443326 --target-lon 30.448078
+```
+
 ## Running Tests
 
 ```bash
